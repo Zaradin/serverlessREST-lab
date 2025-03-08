@@ -1,18 +1,23 @@
 import { APIGatewayProxyHandlerV2 } from "aws-lambda";
-
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import {
+    DynamoDBDocumentClient,
+    GetCommand,
+    QueryCommand,
+    QueryCommandInput,
+} from "@aws-sdk/lib-dynamodb";
 
 const ddbDocClient = createDDbDocClient();
 
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
     try {
-        // Print Event
-        console.log("Event: ", JSON.stringify(event?.queryStringParameters));
+        console.log("[EVENT]", JSON.stringify(event));
         const pathParameters = event?.pathParameters;
+        const queryParameters = event?.queryStringParameters || {};
         const movieId = pathParameters?.movieId
             ? parseInt(pathParameters.movieId)
             : undefined;
+        const includeCast = queryParameters?.cast === "true";
 
         if (!movieId) {
             return {
@@ -24,14 +29,16 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
             };
         }
 
-        const commandOutput = await ddbDocClient.send(
-            new GetCommand({
-                TableName: process.env.TABLE_NAME,
-                Key: { id: movieId },
-            })
-        );
-        console.log("GetCommand response: ", commandOutput);
-        if (!commandOutput.Item) {
+        // Get movie metadata
+        const movieCommand = new GetCommand({
+            TableName: process.env.TABLE_NAME,
+            Key: { id: movieId },
+        });
+
+        const movieResponse = await ddbDocClient.send(movieCommand);
+        console.log("GetCommand response: ", movieResponse);
+
+        if (!movieResponse.Item) {
             return {
                 statusCode: 404,
                 headers: {
@@ -40,9 +47,37 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
                 body: JSON.stringify({ Message: "Invalid movie Id" }),
             };
         }
-        const body = {
-            data: commandOutput.Item,
+
+        let responseBody = {
+            data: movieResponse.Item,
         };
+
+        // If cast=true, get the cast information
+        if (includeCast) {
+            try {
+                const castQueryInput: QueryCommandInput = {
+                    TableName: process.env.CAST_TABLE_NAME,
+                    KeyConditionExpression: "movieId = :m",
+                    ExpressionAttributeValues: {
+                        ":m": movieId,
+                    },
+                };
+
+                const castCommand = new QueryCommand(castQueryInput);
+                const castResponse = await ddbDocClient.send(castCommand);
+
+                // Add cast to the response
+                responseBody = {
+                    data: {
+                        ...movieResponse.Item,
+                        cast: castResponse.Items || [],
+                    },
+                };
+            } catch (castError) {
+                console.log("Error fetching cast:", JSON.stringify(castError));
+                // Continue without cast if there's an error
+            }
+        }
 
         // Return Response
         return {
@@ -50,7 +85,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
             headers: {
                 "content-type": "application/json",
             },
-            body: JSON.stringify(body),
+            body: JSON.stringify(responseBody),
         };
     } catch (error: any) {
         console.log(JSON.stringify(error));
